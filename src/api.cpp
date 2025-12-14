@@ -98,7 +98,7 @@ bool uploadImage(const String& uploadUrl, camera_fb_t* fb) {
 }
 
 ClassificationResult saveTrashRecord(const TrashRecord& record) {
-  ClassificationResult result = {false, "", "", 0.0, 0, "", "", ""};
+  ClassificationResult result = {false, "", "", 0.0, 0, "", "", "", "", 0.0};
 
   HTTPClient http;
   String url = buildUrl("/api/trash");
@@ -154,6 +154,9 @@ ClassificationResult saveTrashRecord(const TrashRecord& record) {
     result.binLabel = data["bin_label"].as<String>();
     result.message = data["message"].as<String>();
     result.error = data["classify_error"].as<String>();
+    // L0 (YOLO) detection info
+    result.l0Label = data["l0_label"].as<String>();
+    result.l0Confidence = data["l0_confidence"].as<float>();
 
     Serial.println("[API] Record saved with classification!");
   } else {

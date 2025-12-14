@@ -78,11 +78,18 @@ void captureAndUpload() {
   Serial.println("========================================");
   Serial.println("[SUCCESS] Classification Complete!");
   Serial.println("========================================");
-  Serial.println("  Category:   " + result.category);
-  if (result.subCategory.length() > 0) {
-    Serial.println("  SubCategory: " + result.subCategory);
+  // L0 (YOLO) detection
+  if (result.l0Label.length() > 0) {
+    Serial.println("  [L0] Object:  " + result.l0Label);
+    Serial.printf("  [L0] Conf:    %.1f%%\n", result.l0Confidence * 100);
   }
-  Serial.printf("  Confidence: %.1f%%\n", result.confidence * 100);
+  // L1 (Trash-Net) classification
+  Serial.println("  [L1] Category: " + result.category);
+  if (result.subCategory.length() > 0) {
+    Serial.println("  [L1] SubCat:   " + result.subCategory);
+  }
+  Serial.printf("  [L1] Conf:     %.1f%%\n", result.confidence * 100);
+  Serial.println("----------------------------------------");
   Serial.printf("  Bin Number: %d\n", result.binNumber);
   Serial.println("  Bin Label:  " + result.binLabel);
   if (result.message.length() > 0) {

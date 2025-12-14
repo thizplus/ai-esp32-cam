@@ -27,6 +27,9 @@ struct ClassificationResult {
   String binLabel;
   String message;
   String error;
+  // L0 (YOLO) detection info
+  String l0Label;       // YOLO detected object (bottle, cup, etc.)
+  float l0Confidence;   // YOLO confidence
 };
 
 namespace Api {

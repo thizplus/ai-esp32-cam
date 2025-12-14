@@ -8,7 +8,7 @@
 
 // ===== API =====
 // ใช้ IP ของคอมพิวเตอร์ใน LAN (หาจาก ipconfig)
-#define API_HOST "192.168.1.30"
+#define API_HOST "192.168.1.24"
 #define API_PORT 8080
 #define API_USE_HTTPS false       // false = HTTP, true = HTTPS
 
