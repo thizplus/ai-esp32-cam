@@ -1,174 +1,178 @@
 #include <Arduino.h>
-#include "esp_camera.h"
-#include "WiFi.h"
-#include "esp_http_server.h"
+#include <WiFi.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 
-// ===== ใส่ชื่อและรหัส WiFi ตรงนี้ =====
-const char* ssid = "IDEAKRUSH 2.4GHz";
-const char* password = "1234567890";
-// =====================================
+#include "config.h"
+#include "led.h"
+#include "camera.h"
+#include "api.h"
+#include "webserver.h"
 
-// ขา GPIO สำหรับ ESP32-CAM (AI-Thinker)
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
+// ===== Capture Flow =====
+void captureAndUpload() {
+  Serial.println("\n========================================");
+  Serial.println("[MAIN] Starting capture...");
+  Serial.println("========================================");
 
-#define PART_BOUNDARY "123456789000000000000987654321"
-static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
-static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
-static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+  Led::working();
 
-httpd_handle_t stream_httpd = NULL;
+  // Pause stream before capture
+  WebServer::pauseStream();
+  delay(100);
 
-bool initCamera() {
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_VGA;
-  config.jpeg_quality = 12;
-  config.fb_count = 2;
-
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed: 0x%x\n", err);
-    return false;
+  // Step 1: Capture
+  Serial.println("[1/4] Capturing photo...");
+  camera_fb_t* fb = Camera::capture();
+  if (!fb) {
+    Serial.println("[ERROR] Capture failed!");
+    Led::error();
+    WebServer::resumeStream();
+    return;
   }
-  Serial.println("Camera init success!");
-  return true;
-}
+  Serial.printf("[OK] Size: %d bytes\n", fb->len);
 
-// หน้าเว็บหลัก
-static esp_err_t index_handler(httpd_req_t *req) {
-  const char* html = R"(
-<!DOCTYPE html>
-<html>
-<head>
-  <title>ESP32-CAM</title>
-  <style>
-    body { font-family: Arial; text-align: center; background: #1a1a1a; color: white; }
-    h1 { margin-top: 20px; }
-    img { max-width: 100%; border: 2px solid #444; border-radius: 10px; }
-  </style>
-</head>
-<body>
-  <h1>ESP32-CAM Live Stream</h1>
-  <img src="/stream">
-</body>
-</html>
-)";
-  httpd_resp_set_type(req, "text/html");
-  return httpd_resp_send(req, html, strlen(html));
-}
+  // Step 2: Get presigned URL
+  Serial.println("[2/4] Getting upload URL...");
+  UploadUrls urls = Api::getUploadUrl(DEVICE_ID);
+  if (!urls.success) {
+    Serial.println("[ERROR] Failed to get URL!");
+    Camera::release(fb);
+    Led::error();
+    WebServer::resumeStream();
+    return;
+  }
 
-// Live stream handler
-static esp_err_t stream_handler(httpd_req_t *req) {
-  camera_fb_t *fb = NULL;
-  esp_err_t res = ESP_OK;
-  char part_buf[64];
+  // Step 3: Upload to R2
+  Serial.println("[3/4] Uploading to R2...");
+  if (!Api::uploadImage(urls.uploadUrl, fb)) {
+    Serial.println("[ERROR] Upload failed!");
+    Camera::release(fb);
+    Led::error();
+    WebServer::resumeStream();
+    return;
+  }
+  Camera::release(fb);
 
-  res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-  if (res != ESP_OK) return res;
+  // Step 4: Save record & get classification
+  Serial.println("[4/4] Saving record & classifying...");
+  TrashRecord record;
+  record.deviceId = DEVICE_ID;
+  record.imageUrl = urls.imageUrl;
+  record.latitude = 13.756331;   // Mock GPS
+  record.longitude = 100.501762;
 
-  while (true) {
-    fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("Camera capture failed");
-      res = ESP_FAIL;
-    } else {
-      size_t hlen = snprintf(part_buf, 64, _STREAM_PART, fb->len);
-      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
-      if (res == ESP_OK) res = httpd_resp_send_chunk(req, part_buf, hlen);
-      if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
-      esp_camera_fb_return(fb);
+  ClassificationResult result = Api::saveTrashRecord(record);
+
+  if (!result.success) {
+    Serial.println("[ERROR] Save/classify failed!");
+    if (result.error.length() > 0) {
+      Serial.println("[ERROR] " + result.error);
     }
-    if (res != ESP_OK) break;
+    Led::error();
+    WebServer::resumeStream();
+    return;
   }
-  return res;
+
+  // Display classification result
+  Serial.println("========================================");
+  Serial.println("[SUCCESS] Classification Complete!");
+  Serial.println("========================================");
+  Serial.println("  Category:   " + result.category);
+  if (result.subCategory.length() > 0) {
+    Serial.println("  SubCategory: " + result.subCategory);
+  }
+  Serial.printf("  Confidence: %.1f%%\n", result.confidence * 100);
+  Serial.printf("  Bin Number: %d\n", result.binNumber);
+  Serial.println("  Bin Label:  " + result.binLabel);
+  if (result.message.length() > 0) {
+    Serial.println("  Message:    " + result.message);
+  }
+  Serial.println("========================================\n");
+
+  // LED feedback: blink bin number
+  Led::success();
+  Led::showBinNumber(result.binNumber);
+  Led::idle();
+
+  // Resume stream
+  WebServer::resumeStream();
 }
 
-void startWebServer() {
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 80;
-
-  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
-    httpd_uri_t index_uri = { .uri = "/", .method = HTTP_GET, .handler = index_handler };
-    httpd_uri_t stream_uri = { .uri = "/stream", .method = HTTP_GET, .handler = stream_handler };
-    httpd_register_uri_handler(stream_httpd, &index_uri);
-    httpd_register_uri_handler(stream_httpd, &stream_uri);
-    Serial.println("Web server started!");
-  }
-}
-
+// ===== Setup =====
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   Serial.begin(115200);
   delay(1000);
-  Serial.println("===================");
-  Serial.println("ESP32-CAM Starting...");
-  Serial.println("===================");
 
-  // เริ่มต้นกล้อง
-  if (!initCamera()) {
-    Serial.println("Camera failed!");
-    return;
+  Serial.println("\n");
+  Serial.println("============================================");
+  Serial.println("    Smart Trash Picker - ESP32-CAM");
+  Serial.println("============================================\n");
+
+  // Init LED
+  Led::init();
+
+  // Init Camera
+  Serial.println("[INIT] Camera...");
+  if (!Camera::init()) {
+    Serial.println("[FATAL] Camera failed!");
+    while (1) { Led::error(); delay(1000); }
   }
 
-  // เชื่อมต่อ WiFi
-  Serial.printf("Connecting to %s", ssid);
-  WiFi.begin(ssid, password);
+  // Connect WiFi
+  Serial.printf("[WIFI] Connecting to %s", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - startTime > WIFI_TIMEOUT_MS) {
+      Serial.println("\n[FATAL] WiFi timeout!");
+      while (1) { Led::error(); delay(1000); }
+    }
     delay(500);
     Serial.print(".");
   }
+
   Serial.println();
-  Serial.println("WiFi connected!");
-  Serial.print("IP Address: ");
+  Serial.println("[OK] WiFi connected!");
+  Serial.print("     IP: ");
   Serial.println(WiFi.localIP());
 
-  // เริ่ม Web Server
-  startWebServer();
+  // Init API (for HTTPS)
+  Api::init();
 
-  Serial.println("===================");
-  Serial.println("Open browser and go to:");
-  Serial.print("http://");
+  // Start Web Server
+  WebServer::init();
+
+  Serial.println();
+  Serial.println("============================================");
+  Serial.println("  READY!");
+  Serial.println("  1. Type 'c' + Enter in Serial Monitor");
+  Serial.print("  2. Open http://");
   Serial.println(WiFi.localIP());
-  Serial.println("===================");
+  Serial.println("============================================\n");
+
+  Led::idle();
 }
 
+// ===== Loop =====
 void loop() {
-  delay(1000);
+  // Serial command
+  if (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'c' || c == 'C') {
+      Serial.println("[SERIAL] Capture!");
+      captureAndUpload();
+    }
+  }
+
+  // Web command
+  if (WebServer::isCaptureRequested()) {
+    WebServer::clearCaptureRequest();
+    captureAndUpload();
+  }
+
+  delay(10);
 }
